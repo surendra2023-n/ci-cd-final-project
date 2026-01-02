@@ -1,0 +1,98 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: cd-pipeline
+spec:
+  workspaces:
+    - name: output
+  params:
+    - name: repo-url
+      type: string
+      description: The Git repository URL to clone from
+    - name: revision
+      type: string
+      description: The Git revision to checkout
+      default: "main"
+    - name: app-name
+      type: string
+      description: The name of the application
+      default: "myapp"
+  tasks:
+    - name: cleanup
+      taskRef:
+        name: cleanup
+        kind: Task
+      workspaces:
+        - name: source
+          workspace: output
+    
+    - name: git-clone
+      taskRef:
+        name: git-clone
+        kind: Task
+      runAfter:
+        - cleanup
+      workspaces:
+        - name: output
+          workspace: output
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+        - name: deleteExisting
+          value: "true"
+    
+    - name: flake8-lint
+      taskRef:
+        name: flake8
+        kind: Task
+      runAfter:
+        - git-clone
+      workspaces:
+        - name: source
+          workspace: output
+    
+    - name: nose-tests
+      taskRef:
+        name: nose
+        kind: Task
+      runAfter:
+        - flake8-lint
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: args
+          value: "-v"
+    
+    - name: buildah-build
+      taskRef:
+        name: buildah
+        kind: Task
+      runAfter:
+        - nose-tests
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: IMAGE
+          value: "image-registry.openshift-image-registry.svc:5000/sn-labs-sbnarakatla/$(params.app-name):latest"
+        - name: DOCKERFILE
+          value: "./Dockerfile"
+        - name: CONTEXT
+          value: "."
+        - name: TLSVERIFY
+          value: "false"
+    
+    - name: deploy-app
+      taskRef:
+        name: openshift-client
+        kind: Task
+      runAfter:
+        - buildah-build
+      params:
+        - name: SCRIPT
+          value: |
+            oc create deployment $(params.app-name) --image=image-registry.openshift-image-registry.svc:5000/sn-labs-sbnarakatla/$(params.app-name):latest --dry-run=client -o yaml | oc apply -f -
+            oc expose deployment $(params.app-name) --port=8080
